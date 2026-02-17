@@ -42,5 +42,14 @@ class RestoreJobAdmin(admin.ModelAdmin):
 
 @admin.register(Schedule)
 class ScheduleAdmin(admin.ModelAdmin):
-    list_display = ("id", "backup_job", "cron_expression", "is_active", "next_run_at")
+    list_display = (
+        "id",
+        "backup_job",
+        "cron_expression",
+        "is_active",
+        "retry_count",
+        "max_retries",
+        "next_run_at",
+        "lease_expires_at",
+    )
     list_filter = ("is_active",)

@@ -31,7 +31,10 @@ class Command(BaseCommand):
         active_schedules = Schedule.objects.filter(is_active=True).count()
         due_schedules = Schedule.objects.filter(is_active=True).filter(
             Q(next_run_at__isnull=True) | Q(next_run_at__lte=now)
+        ).filter(
+            Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)
         ).count()
+        leased_schedules = Schedule.objects.filter(is_active=True, lease_expires_at__gt=now).count()
 
         latest_artifact = BackupArtifact.objects.select_related("backup_job").first()
         latest_restore = RestoreJob.objects.select_related("backup_artifact").first()
@@ -52,7 +55,7 @@ class Command(BaseCommand):
             f"backup_jobs total={total_jobs} success={success_jobs} failed={failed_jobs} artifacts={total_artifacts}"
         )
         self.stdout.write(f"restore_jobs total={total_restores} failed={failed_restores}")
-        self.stdout.write(f"schedules active={active_schedules} due_now={due_schedules}")
+        self.stdout.write(f"schedules active={active_schedules} due_now={due_schedules} leased={leased_schedules}")
 
         if next_schedule:
             self.stdout.write(

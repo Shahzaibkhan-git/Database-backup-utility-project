@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -8,13 +9,73 @@ from .models import Schedule
 
 def get_due_schedules(now=None):
     now = now or timezone.now()
-    return Schedule.objects.filter(is_active=True).filter(Q(next_run_at__isnull=True) | Q(next_run_at__lte=now))
+    return (
+        Schedule.objects.filter(is_active=True)
+        .filter(Q(next_run_at__isnull=True) | Q(next_run_at__lte=now))
+        .filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now))
+    )
+
+
+def claim_schedule(schedule_id: int, lease_seconds: int = 300, now=None) -> Schedule | None:
+    now = now or timezone.now()
+    lease_until = now + timezone.timedelta(seconds=max(int(lease_seconds), 1))
+
+    with transaction.atomic():
+        updated = (
+            Schedule.objects.filter(id=schedule_id, is_active=True)
+            .filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now))
+            .update(lease_expires_at=lease_until)
+        )
+        if updated == 0:
+            return None
+        return Schedule.objects.select_related("backup_job").get(id=schedule_id)
 
 
 def mark_schedule_ran(schedule: Schedule, next_run_at=None):
     schedule.last_run_at = timezone.now()
     schedule.next_run_at = next_run_at
-    schedule.save(update_fields=["last_run_at", "next_run_at"])
+    schedule.retry_count = 0
+    schedule.last_error = ""
+    schedule.lease_expires_at = None
+    schedule.save(update_fields=["last_run_at", "next_run_at", "retry_count", "last_error", "lease_expires_at"])
+
+
+def mark_schedule_failed(schedule: Schedule, error_message: str, next_run_at=None, now=None) -> dict:
+    now = now or timezone.now()
+    attempt = schedule.retry_count + 1
+    max_retries = max(int(schedule.max_retries), 0)
+
+    if attempt <= max_retries:
+        delay_seconds = _retry_delay_seconds(schedule.retry_backoff_seconds, attempt)
+        retry_at = now + timezone.timedelta(seconds=delay_seconds)
+        schedule.retry_count = attempt
+        schedule.next_run_at = retry_at
+        state = "retrying"
+    else:
+        # Retries exhausted for this run window; move to next cron tick.
+        schedule.retry_count = 0
+        schedule.next_run_at = next_run_at
+        state = "next_cron"
+        delay_seconds = 0
+
+    schedule.last_error = (error_message or "").strip()[:4000]
+    schedule.lease_expires_at = None
+    schedule.save(update_fields=["retry_count", "next_run_at", "last_error", "lease_expires_at"])
+
+    return {
+        "state": state,
+        "attempt": attempt,
+        "max_retries": max_retries,
+        "delay_seconds": delay_seconds,
+        "next_run_at": schedule.next_run_at,
+    }
+
+
+def _retry_delay_seconds(base_seconds: int, attempt: int) -> int:
+    base = max(int(base_seconds), 1)
+    exponent = max(int(attempt) - 1, 0)
+    # Exponential backoff capped at 1 hour.
+    return min(base * (2**exponent), 3600)
 
 
 def get_next_run_at(cron_expression: str, after=None):

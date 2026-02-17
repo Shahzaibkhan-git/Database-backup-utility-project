@@ -74,6 +74,19 @@ class Command(BaseCommand):
         try:
             adapter = get_adapter(options["db_type"], connection_params)
             adapter.test_connection()
+            requested_backup_type = options["backup_type"]
+            if requested_backup_type == "incremental" and not adapter.supports_incremental:
+                logger.warning(
+                    "%s adapter does not implement native incremental backup yet; "
+                    "running full snapshot fallback.",
+                    options["db_type"],
+                )
+            if requested_backup_type == "differential" and not adapter.supports_differential:
+                logger.warning(
+                    "%s adapter does not implement native differential backup yet; "
+                    "running full snapshot fallback.",
+                    options["db_type"],
+                )
 
             output_dir = Path(options["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)

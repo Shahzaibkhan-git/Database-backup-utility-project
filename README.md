@@ -10,10 +10,12 @@ Current status:
 - PostgreSQL full backup and restore via `pg_dump`/`pg_restore`: implemented
 - MySQL full backup and restore via `mysqldump`/`mysql`: implemented
 - MongoDB full backup and restore via `mongodump`/`mongorestore`: implemented
+- Incremental/differential backup modes: implemented (current adapters use full-snapshot fallback)
 - Compression (`.gz`): implemented
 - Encryption (`.enc` using `cryptography`): implemented
 - Local storage: implemented
 - S3/GCS/Azure upload backends: implemented
+- Advanced scheduler reliability: implemented (retry policy, exponential backoff, lease/lock)
 
 ## 1) Architecture in One Minute
 
@@ -169,6 +171,8 @@ Create schedule from an existing backup job:
 ./.venv/bin/python manage.py create_schedule \
   --backup-job-id 5 \
   --cron "*/5 * * * *" \
+  --max-retries 3 \
+  --retry-backoff-seconds 60 \
   --due-now
 ```
 
@@ -190,6 +194,12 @@ Run scheduler continuously every 60s:
 ./.venv/bin/python manage.py run_scheduler --interval-seconds 60
 ```
 
+Run scheduler with explicit lease window:
+
+```bash
+./.venv/bin/python manage.py run_scheduler --once --lease-seconds 300
+```
+
 Run scheduler via Celery Beat (recommended for production):
 
 ```bash
@@ -207,6 +217,7 @@ What Beat does here:
 - Every `BACKUP_SCHEDULER_BEAT_INTERVAL_SECONDS`, Beat queues `backup_core.tasks.run_scheduler_once`.
 - That task runs one pass of your existing `Schedule` rows (same logic as `manage.py run_scheduler --once`).
 - The task runs scheduler in quiet mode to avoid noisy `WARNING/MainProcess` stdout lines.
+- Scheduler now applies retry/backoff and lease locking on failures/concurrency.
 
 Restore from artifact id:
 
@@ -257,6 +268,7 @@ Validated in this project environment:
 - SQLite: connection test, full backup, list artifacts, restore.
 - PostgreSQL: connection test, full backup, restore (including compatibility handling for `transaction_timeout` warning).
 - Scheduler: dry run detects due schedules, actual run executes `backup_db` and creates `BackupArtifact`.
+- Scheduler reliability: retries, backoff windows, and lease/lock behavior verified in tests.
 
 ## 8) Example Scheduler Run Output
 
@@ -273,7 +285,8 @@ Scheduler started.
 Scheduler finished. processed=1
 ```
 
-## 9) Next Implementation Milestones
+## 9) Backup Type Notes
 
-1. Incremental/differential support per database.
-2. Advanced scheduler features (retry policy, lock/lease, backoff).
+1. `full`: Native full snapshot/backup.
+2. `incremental`: Accepted for all adapters; currently executes a full-snapshot fallback.
+3. `differential`: Accepted for all adapters; currently executes a full-snapshot fallback.

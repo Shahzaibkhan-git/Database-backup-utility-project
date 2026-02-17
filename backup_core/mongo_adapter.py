@@ -56,9 +56,8 @@ class MongoAdapter(DatabaseAdapter):
         backup_type: str = "full",
         tables: Iterable[str] | None = None,
     ) -> str:
-        self.validate_backup_type(backup_type)
-        if backup_type != "full":
-            raise AdapterError("MongoDB adapter currently supports only full backup.")
+        # Incremental/differential currently use full snapshot fallback for MongoDB.
+        self.effective_backup_type(backup_type)
 
         self._require_binary("mongodump")
         database = self._required_database()

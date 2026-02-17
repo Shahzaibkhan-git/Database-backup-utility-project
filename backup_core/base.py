@@ -12,6 +12,8 @@ class DatabaseAdapter(ABC):
     db_type = "unknown"
     supports_incremental = False
     supports_differential = False
+    fallback_incremental_to_full = True
+    fallback_differential_to_full = True
     supports_selective_restore = False
 
     def __init__(self, connection_params: dict | None = None) -> None:
@@ -39,11 +41,19 @@ class DatabaseAdapter(ABC):
         if backup_type not in allowed:
             raise AdapterError(f"Unsupported backup type '{backup_type}'.")
 
-        if backup_type == "incremental" and not self.supports_incremental:
+        if backup_type == "incremental" and not self.supports_incremental and not self.fallback_incremental_to_full:
             raise AdapterError(f"{self.db_type} adapter does not support incremental backup yet.")
 
-        if backup_type == "differential" and not self.supports_differential:
+        if backup_type == "differential" and not self.supports_differential and not self.fallback_differential_to_full:
             raise AdapterError(f"{self.db_type} adapter does not support differential backup yet.")
+
+    def effective_backup_type(self, backup_type: str) -> str:
+        self.validate_backup_type(backup_type)
+        if backup_type == "incremental" and not self.supports_incremental:
+            return "full"
+        if backup_type == "differential" and not self.supports_differential:
+            return "full"
+        return backup_type
 
 
 def get_adapter(db_type: str, connection_params: dict | None = None) -> DatabaseAdapter:

@@ -40,6 +40,25 @@ class SQLiteAdapterTests(SimpleTestCase):
 
             self.assertTrue(Path(result).exists())
 
+    def test_incremental_and_differential_fallback_to_full_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "source.db"
+            inc_path = Path(tmp_dir) / "incremental.db"
+            diff_path = Path(tmp_dir) / "differential.db"
+
+            conn = sqlite3.connect(source_path)
+            conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, name TEXT);")
+            conn.execute("INSERT INTO sample (name) VALUES ('demo');")
+            conn.commit()
+            conn.close()
+
+            adapter = SQLiteAdapter({"path": str(source_path)})
+            inc_result = adapter.backup(str(inc_path), backup_type="incremental")
+            diff_result = adapter.backup(str(diff_path), backup_type="differential")
+
+            self.assertTrue(Path(inc_result).exists())
+            self.assertTrue(Path(diff_result).exists())
+
     def test_restore_replaces_target(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_path = Path(tmp_dir) / "source.db"
@@ -409,3 +428,64 @@ class SchedulerCommandTests(TestCase):
         text = out.getvalue()
         self.assertIn("backup_job_id=", text)
         self.assertIn("cron='*/5 * * * *'", text)
+
+    @patch("backup_core.management.commands.run_scheduler.call_command", side_effect=RuntimeError("boom"))
+    def test_failed_schedule_sets_retry_with_backoff(self, _mock_call_command):
+        self.schedule.max_retries = 2
+        self.schedule.retry_backoff_seconds = 5
+        self.schedule.retry_count = 0
+        self.schedule.next_run_at = timezone.now() - timezone.timedelta(minutes=1)
+        self.schedule.save(update_fields=["max_retries", "retry_backoff_seconds", "retry_count", "next_run_at"])
+
+        call_command("run_scheduler", once=True, stdout=StringIO())
+        self.schedule.refresh_from_db()
+
+        self.assertEqual(self.schedule.retry_count, 1)
+        self.assertIsNotNone(self.schedule.next_run_at)
+        self.assertGreater(self.schedule.next_run_at, timezone.now())
+        self.assertIn("boom", self.schedule.last_error)
+        self.assertIsNone(self.schedule.lease_expires_at)
+
+    @patch("backup_core.management.commands.run_scheduler.call_command", side_effect=RuntimeError("boom"))
+    def test_failed_schedule_exhausts_retries_and_returns_to_cron(self, _mock_call_command):
+        self.schedule.max_retries = 2
+        self.schedule.retry_backoff_seconds = 5
+        self.schedule.retry_count = 2
+        self.schedule.next_run_at = timezone.now() - timezone.timedelta(minutes=1)
+        self.schedule.save(update_fields=["max_retries", "retry_backoff_seconds", "retry_count", "next_run_at"])
+
+        call_command("run_scheduler", once=True, stdout=StringIO())
+        self.schedule.refresh_from_db()
+
+        self.assertEqual(self.schedule.retry_count, 0)
+        self.assertIsNotNone(self.schedule.next_run_at)
+        self.assertGreater(self.schedule.next_run_at, timezone.now())
+        self.assertIn("boom", self.schedule.last_error)
+        self.assertIsNone(self.schedule.lease_expires_at)
+
+    @patch("backup_core.management.commands.run_scheduler.call_command")
+    def test_schedule_with_active_lease_is_skipped(self, mock_call_command):
+        self.schedule.lease_expires_at = timezone.now() + timezone.timedelta(minutes=5)
+        self.schedule.next_run_at = timezone.now() - timezone.timedelta(minutes=1)
+        self.schedule.save(update_fields=["lease_expires_at", "next_run_at"])
+
+        call_command("run_scheduler", once=True, stdout=StringIO())
+
+        self.schedule.refresh_from_db()
+        self.assertEqual(self.schedule.retry_count, 0)
+        self.assertIsNotNone(self.schedule.lease_expires_at)
+        mock_call_command.assert_not_called()
+
+    @patch("backup_core.management.commands.run_scheduler.call_command")
+    def test_invalid_cron_disables_schedule(self, mock_call_command):
+        self.schedule.cron_expression = "bad cron"
+        self.schedule.next_run_at = timezone.now() - timezone.timedelta(minutes=1)
+        self.schedule.save(update_fields=["cron_expression", "next_run_at"])
+
+        call_command("run_scheduler", once=True, stdout=StringIO())
+
+        self.schedule.refresh_from_db()
+        self.assertFalse(self.schedule.is_active)
+        self.assertIn("Invalid cron", self.schedule.last_error)
+        self.assertIsNone(self.schedule.lease_expires_at)
+        mock_call_command.assert_not_called()

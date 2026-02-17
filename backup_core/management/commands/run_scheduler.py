@@ -11,7 +11,13 @@ from django.utils import timezone
 
 from backup_core.logger import get_logger
 from backup_core.models import Schedule
-from backup_core.scheduler import get_due_schedules, get_next_run_at, mark_schedule_ran
+from backup_core.scheduler import (
+    claim_schedule,
+    get_due_schedules,
+    get_next_run_at,
+    mark_schedule_failed,
+    mark_schedule_ran,
+)
 
 
 class Command(BaseCommand):
@@ -29,6 +35,12 @@ class Command(BaseCommand):
         parser.add_argument("--schedule-id", type=int, help="Run only one schedule ID")
         parser.add_argument("--dry-run", action="store_true", help="Show what would run without executing backups")
         parser.add_argument("--quiet", action="store_true", help="Suppress command stdout output")
+        parser.add_argument(
+            "--lease-seconds",
+            type=int,
+            default=300,
+            help="Lease duration to prevent duplicate schedule execution (default: 300)",
+        )
 
     def handle(self, *args, **options):
         logger = get_logger("backup_core.scheduler")
@@ -38,6 +50,7 @@ class Command(BaseCommand):
         interval = max(options["interval_seconds"], 1)
         max_jobs = max(options["max_jobs"], 1)
         schedule_id = options.get("schedule_id")
+        lease_seconds = max(int(options["lease_seconds"]), 1)
         command_stdout = io.StringIO() if quiet else self.stdout
         command_stderr = io.StringIO() if quiet else self.stderr
 
@@ -50,6 +63,7 @@ class Command(BaseCommand):
                 dry_run=dry_run,
                 max_jobs=max_jobs,
                 schedule_id=schedule_id,
+                lease_seconds=lease_seconds,
                 command_stdout=command_stdout,
                 command_stderr=command_stderr,
             )
@@ -67,6 +81,7 @@ class Command(BaseCommand):
         dry_run: bool,
         max_jobs: int,
         schedule_id: int | None,
+        lease_seconds: int,
         command_stdout,
         command_stderr,
     ) -> int:
@@ -76,14 +91,18 @@ class Command(BaseCommand):
         if schedule_id is not None:
             schedules = schedules.filter(id=schedule_id)
 
-        schedules = list(schedules.select_related("backup_job")[:max_jobs])
+        schedule_ids = list(schedules.values_list("id", flat=True)[:max_jobs])
 
-        if not schedules:
+        if not schedule_ids:
             logger.info("No due schedules at %s", now.isoformat())
             return 0
 
         processed = 0
-        for schedule in schedules:
+        for schedule_id_value in schedule_ids:
+            schedule = claim_schedule(schedule_id_value, lease_seconds=lease_seconds, now=now)
+            if schedule is None:
+                continue
+
             processed += 1
             try:
                 self._run_schedule(
@@ -95,7 +114,38 @@ class Command(BaseCommand):
                     command_stderr=command_stderr,
                 )
             except Exception as exc:  # pragma: no cover
-                logger.exception("Schedule %s failed: %s", schedule.id, exc)
+                try:
+                    next_run_at = get_next_run_at(schedule.cron_expression, after=now)
+                except ValueError:
+                    schedule.is_active = False
+                    schedule.last_error = str(exc)[:4000]
+                    schedule.lease_expires_at = None
+                    schedule.save(update_fields=["is_active", "last_error", "lease_expires_at"])
+                    logger.exception(
+                        "Schedule %s disabled because cron is invalid and cannot compute next run: %s",
+                        schedule.id,
+                        exc,
+                    )
+                    continue
+
+                failure = mark_schedule_failed(schedule, str(exc), next_run_at=next_run_at, now=now)
+                if failure["state"] == "retrying":
+                    logger.exception(
+                        "Schedule %s failed (attempt %s/%s). Retry in %ss at %s: %s",
+                        schedule.id,
+                        failure["attempt"],
+                        failure["max_retries"],
+                        failure["delay_seconds"],
+                        failure["next_run_at"].isoformat() if failure["next_run_at"] else "-",
+                        exc,
+                    )
+                else:
+                    logger.exception(
+                        "Schedule %s failed after max retries. Next cron run at %s: %s",
+                        schedule.id,
+                        failure["next_run_at"].isoformat() if failure["next_run_at"] else "-",
+                        exc,
+                    )
 
         return processed
 
@@ -105,8 +155,7 @@ class Command(BaseCommand):
         try:
             next_run = get_next_run_at(schedule.cron_expression, after=now)
         except ValueError as exc:
-            logger.error("Invalid cron for schedule %s (%s): %s", schedule.id, schedule.cron_expression, exc)
-            return
+            raise ValueError(f"Invalid cron for schedule {schedule.id} ({schedule.cron_expression}): {exc}") from exc
 
         if dry_run:
             logger.info(
@@ -116,6 +165,8 @@ class Command(BaseCommand):
                 schedule.cron_expression,
                 next_run.isoformat(),
             )
+            schedule.lease_expires_at = None
+            schedule.save(update_fields=["lease_expires_at"])
             return
 
         backup_options = self._build_backup_options(template)

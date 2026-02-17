@@ -26,8 +26,16 @@ class Command(BaseCommand):
         for schedule in schedules:
             next_run = schedule.next_run_at.isoformat() if schedule.next_run_at else "-"
             last_run = schedule.last_run_at.isoformat() if schedule.last_run_at else "-"
+            lease_until = schedule.lease_expires_at.isoformat() if schedule.lease_expires_at else "-"
+            err = (schedule.last_error or "").strip()
+            if len(err) > 80:
+                err = f"{err[:77]}..."
+            if not err:
+                err = "-"
             self.stdout.write(
                 f"id={schedule.id} backup_job_id={schedule.backup_job_id} "
                 f"name={schedule.backup_job.name} active={schedule.is_active} "
-                f"cron='{schedule.cron_expression}' next_run={next_run} last_run={last_run}"
+                f"cron='{schedule.cron_expression}' retries={schedule.retry_count}/{schedule.max_retries} "
+                f"backoff={schedule.retry_backoff_seconds}s lease_until={lease_until} "
+                f"next_run={next_run} last_run={last_run} last_error={err}"
             )
