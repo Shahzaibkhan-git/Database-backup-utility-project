@@ -6,12 +6,25 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Local runtime/generated files
 *.sqlite3
 *.sqlite3.*
 backups/
 logs/
+celerybeat-schedule*
+*.log
+
+# Environment and secrets
+.env
+.env.*
+*.env
 
 # IDE/system
 .DS_Store
+.idea/
+.vscode/

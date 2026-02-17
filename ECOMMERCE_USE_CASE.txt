@@ -1,0 +1,74 @@
+E-commerce Backup Use Case (Production)
+=======================================
+
+Goal
+----
+Use this backup utility as a separate backup service for an e-commerce webapp database.
+
+Recommended Deployment
+----------------------
+1. Run this backup utility on a separate VM/container.
+2. Ensure network access to the production DB host.
+3. Use a dedicated DB backup user (least privilege).
+4. Store metadata in control.sqlite3 (default).
+5. Store backup files locally and/or push to cloud storage.
+
+Typical E-commerce Backup Plan
+------------------------------
+1. Full backup every 6 hours.
+2. Compressed output enabled.
+3. Cloud copy enabled (S3/GCS/Azure) for offsite safety.
+4. Weekly restore drill into staging DB.
+5. Monitor status daily with: manage.py system_status
+
+PostgreSQL Example (Common E-commerce Setup)
+--------------------------------------------
+Manual backup:
+./.venv/bin/python manage.py backup_db \
+  --name ecommerce-prod \
+  --db-type postgres \
+  --host <DB_HOST> --port 5432 \
+  --username <BACKUP_USER> --password '<BACKUP_PASSWORD>' \
+  --database <ECOM_DB> \
+  --output-dir backups \
+  --compress
+
+Create recurring schedule:
+./.venv/bin/python manage.py create_schedule \
+  --backup-job-id <JOB_ID> \
+  --cron "0 */6 * * *" \
+  --max-retries 3 \
+  --retry-backoff-seconds 60 \
+  --due-now
+
+Start scheduler workers:
+./.venv/bin/celery -A dbbackup worker -l info
+./.venv/bin/celery -A dbbackup beat -l info
+
+Restore Drill (to staging)
+--------------------------
+./.venv/bin/python manage.py restore_db \
+  --backup-file backups/<backup-file>.dump \
+  --db-type postgres \
+  --host <STAGING_DB_HOST> --port 5432 \
+  --username <STAGING_USER> --password '<STAGING_PASSWORD>' \
+  --database <STAGING_DB>
+
+Validation Checklist
+--------------------
+1. Latest backup artifact exists (list_backups).
+2. Restore completed successfully (restore_db output).
+3. App can read key tables after restore (orders, users, products).
+4. Scheduler next run and lease state look healthy (system_status).
+
+Security Notes
+--------------
+1. Do not commit DB passwords to git.
+2. Use environment variables or secret manager.
+3. Limit backup user permissions.
+4. Encrypt backup files if required by policy.
+
+Important Limitation
+--------------------
+Backup types "incremental" and "differential" are accepted by CLI.
+Current adapters execute full-snapshot fallback for those modes.
