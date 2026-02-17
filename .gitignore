@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local runtime/generated files
+*.sqlite3
+*.sqlite3.*
+backups/
+logs/
+
+# IDE/system
+.DS_Store
