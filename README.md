@@ -67,6 +67,12 @@ Run migrations for metadata DB:
 ./.venv/bin/python manage.py migrate
 ```
 
+Run Django system checks:
+
+```bash
+./.venv/bin/python manage.py check
+```
+
 ## 3) Defaults and Environment Variables
 
 Defaults:
@@ -211,6 +217,12 @@ export BACKUP_SCHEDULER_BEAT_INTERVAL_SECONDS=60
 
 # Start beat (in another terminal)
 ./.venv/bin/celery -A dbbackup beat -l info
+```
+
+Watch backup logs:
+
+```bash
+tail -f logs/backup.log
 ```
 
 What Beat does here:
